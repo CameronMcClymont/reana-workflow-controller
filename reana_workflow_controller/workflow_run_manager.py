@@ -87,6 +87,7 @@ from reana_workflow_controller.config import (  # isort:skip
     REANA_KUBERNETES_JOBS_MAX_USER_MEMORY_LIMIT,
     REANA_KUBERNETES_JOBS_MAX_USER_TIMEOUT_LIMIT,
     REANA_KUBERNETES_JOBS_MIN_USER_UID,
+    REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM,
     REANA_WORKFLOW_ENGINE_IMAGE_CWL,
     REANA_WORKFLOW_ENGINE_IMAGE_SERIAL,
     REANA_WORKFLOW_ENGINE_IMAGE_SNAKEMAKE,
@@ -707,6 +708,9 @@ class KubernetesWorkflowRunManager(WorkflowRunManager):
             run_as_user=WORKFLOW_RUNTIME_USER_UID,
             run_as_non_root=True,
             allow_privilege_escalation=False,
+            read_only_root_filesystem=True
+            if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM
+            else None,
         )
         workflow_engine_container.volume_mounts = [workspace_mount]
 
@@ -816,6 +820,10 @@ class KubernetesWorkflowRunManager(WorkflowRunManager):
                 {
                     "name": "REANA_KUBERNETES_JOBS_MAX_USER_TIMEOUT_LIMIT",
                     "value": REANA_KUBERNETES_JOBS_MAX_USER_TIMEOUT_LIMIT,
+                },
+                {
+                    "name": "REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM",
+                    "value": str(REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM),
                 },
                 {"name": "WORKSPACE_PATHS", "value": json.dumps(WORKSPACE_PATHS)},
             ]

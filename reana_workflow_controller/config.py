@@ -201,6 +201,15 @@ UID are refused at submission time with a clear error message. Forwarded to
 reana-job-controller via the job batch pod environment.
 """
 
+REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM = bool(
+    strtobool(os.getenv("REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM", "false"))
+)
+"""Whether to mount a read-only root filesystem in user workflow pods.
+
+When enabled, writes to paths inside the container image are rejected while
+mounted workspace volumes remain writable.
+"""
+
 WORKFLOW_ENGINE_COMMON_ENV_VARS = [
     {"name": "SHARED_VOLUME_PATH", "value": SHARED_VOLUME_PATH},
     {"name": "RABBIT_MQ", "value": MQ_CONNECTION_STRING},

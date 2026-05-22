@@ -29,6 +29,7 @@ from reana_workflow_controller.config import (  # isort:skip
     REANA_INGRESS_ANNOTATIONS,
     REANA_INGRESS_CLASS_NAME,
     REANA_INGRESS_HOST,
+    REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM,
 )
 
 
@@ -225,7 +226,11 @@ class InteractiveDeploymentK8sBuilder(object):
     def add_run_with_root_permissions(self):
         """Run interactive session with root."""
         security_context = client.V1SecurityContext(
-            run_as_user=0, allow_privilege_escalation=False
+            run_as_user=0,
+            allow_privilege_escalation=False,
+            read_only_root_filesystem=True
+            if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM
+            else None,
         )
         self._session_container.security_context = security_context
 
