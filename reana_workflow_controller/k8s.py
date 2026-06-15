@@ -6,6 +6,8 @@
 
 """REANA Workflow Controller Kubernetes utils."""
 
+import shlex
+
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 from reana_commons.config import (
@@ -228,9 +230,9 @@ class InteractiveDeploymentK8sBuilder(object):
         security_context = client.V1SecurityContext(
             run_as_user=0,
             allow_privilege_escalation=False,
-            read_only_root_filesystem=True
-            if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM
-            else None,
+            read_only_root_filesystem=(
+                True if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM else None
+            ),
         )
         self._session_container.security_context = security_context
 
@@ -301,7 +303,36 @@ def build_interactive_jupyter_deployment_k8s_objects(
         command_args.append(
             "--NotebookApp.token='{access_token}'".format(access_token=access_token)
         )
-    deployment_builder.add_command_arguments(command_args)
+    if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM:
+        # With a read-only root filesystem Jupyter cannot write to its default
+        # home, runtime and cache directories inside the container image, so
+        # redirect all of its per-session state into the workspace and create
+        # the directories before launching the notebook server.
+        session_state_paths = {
+            "HOME": f"{workspace}/.reana/home",
+            "JUPYTER_RUNTIME_DIR": f"{workspace}/.reana/jupyter/runtime",
+            "JUPYTER_DATA_DIR": f"{workspace}/.reana/jupyter/data",
+            "IPYTHONDIR": f"{workspace}/.reana/ipython",
+            "PYTHONUSERBASE": f"{workspace}/.reana/usr",
+            "XDG_CACHE_HOME": f"{workspace}/.reana/cache",
+            "TMPDIR": f"{workspace}/.reana/tmp",
+        }
+
+        for env_name, env_value in session_state_paths.items():
+            deployment_builder.add_environment_variable(env_name, env_value)
+
+        mkdir_cmd = "mkdir -p " + " ".join(
+            shlex.quote(path) for path in session_state_paths.values()
+        )
+        notebook_cmd = " ".join(shlex.quote(arg) for arg in command_args)
+
+        deployment_builder.add_command(["/bin/bash", "-c"])
+        deployment_builder.add_command_arguments(
+            [f"{mkdir_cmd} && exec {notebook_cmd}"]
+        )
+    else:
+        deployment_builder.add_command_arguments(command_args)
+
     deployment_builder.add_reana_shared_storage()
     if cvmfs_repos:
         deployment_builder.add_cvmfs_repo_mounts(cvmfs_repos)

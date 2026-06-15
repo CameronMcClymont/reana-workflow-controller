@@ -207,7 +207,12 @@ REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM = bool(
 """Whether to mount a read-only root filesystem in user workflow pods.
 
 When enabled, writes to paths inside the container image are rejected while
-mounted workspace volumes remain writable.
+mounted workspace volumes remain writable. Applies to the workflow engine,
+user jobs, interactive sessions and Dask scheduler/worker pods; standard
+cache and tmp locations (``TMPDIR``, ``XDG_CACHE_HOME``, Jupyter state
+directories) are redirected into the workspace, so software that hardcodes
+paths like ``/tmp`` will fail. Host-path mounts default to read-only unless
+a mount sets ``readOnly: false``.
 """
 
 WORKFLOW_ENGINE_COMMON_ENV_VARS = [

@@ -131,10 +131,15 @@ def test_add_hostpath_volumes_with_mounts(
 
         # Assert
         expected_volume_mounts = [
-            {"name": "volume1", "mountPath": "/container/path/volume1"},
+            {
+                "name": "volume1",
+                "mountPath": "/container/path/volume1",
+                "readOnly": False,
+            },
             {
                 "name": "volume2",
                 "mountPath": "/host/path/volume2",
+                "readOnly": False,
             },
         ]
         expected_volumes = [
@@ -479,3 +484,101 @@ def test_prepare_cluster(dask_resource_manager):
             ]["dask.org/cluster-name"]
             == dask_resource_manager.cluster_name
         )
+
+
+def _minimal_cluster_body():
+    """Return a cluster body shaped like the loaded Dask template."""
+    return {
+        "spec": {
+            "worker": {
+                "spec": {
+                    "containers": [
+                        {"args": ["exec dask-worker"], "env": [], "volumeMounts": []}
+                    ],
+                    "volumes": [],
+                }
+            },
+            "scheduler": {
+                "spec": {"containers": [{"args": ["dask-scheduler"]}]},
+            },
+        }
+    }
+
+
+def test_add_read_only_root_filesystem(dask_resource_manager):
+    """Test that the read-only flag hardens both Dask worker and scheduler."""
+    dask_resource_manager.cluster_body = _minimal_cluster_body()
+    dask_resource_manager._add_read_only_root_filesystem()
+
+    worker = dask_resource_manager.cluster_body["spec"]["worker"]["spec"]["containers"][
+        0
+    ]
+    scheduler_spec = dask_resource_manager.cluster_body["spec"]["scheduler"]["spec"]
+    scheduler = scheduler_spec["containers"][0]
+    scheduler_env = {e["name"]: e["value"] for e in scheduler["env"]}
+
+    # both containers get a read-only root filesystem
+    assert worker["securityContext"]["readOnlyRootFilesystem"] is True
+    assert scheduler["securityContext"]["readOnlyRootFilesystem"] is True
+
+    # the worker redirects tmp/cache into a private workspace scratch dir
+    assert "export TMPDIR=" in worker["args"][0]
+    assert "$DASK_WORKER_NAME" in worker["args"][0]
+    assert worker["args"][0].endswith("exec dask-worker")
+
+    # the scheduler gets a workspace-scoped scratch mount and tmp/cache env
+    scheduler_mount = scheduler["volumeMounts"][0]
+    assert scheduler_mount["mountPath"] == "/scratch"
+    assert scheduler_mount["subPath"].endswith(".reana/dask-scheduler")
+    assert scheduler_env["TMPDIR"] == "/scratch/tmp"
+    assert scheduler_env["XDG_CACHE_HOME"] == "/scratch/cache"
+
+    # the scratch volume is added to the scheduler pod and pre-created by an
+    # init container so the subPath mount does not fail
+    assert scheduler_spec["volumes"]
+    init_container = scheduler_spec["initContainers"][0]
+    assert "mkdir -p" in init_container["args"][0]
+
+
+def test_prepare_cluster_applies_read_only_root_filesystem(dask_resource_manager):
+    """Test that _prepare_cluster wires in the hardening when the flag is on."""
+    with patch(
+        "reana_workflow_controller.dask."
+        "REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM",
+        True,
+    ), patch.object(
+        dask_resource_manager, "_add_read_only_root_filesystem"
+    ) as mock_harden, patch.object(
+        dask_resource_manager, "_add_image_pull_secrets"
+    ), patch.object(
+        dask_resource_manager, "_add_hostpath_volumes"
+    ), patch.object(
+        dask_resource_manager, "_add_workspace_volume"
+    ), patch.object(
+        dask_resource_manager, "_add_shared_volume"
+    ), patch.object(
+        dask_resource_manager, "_add_eos_volume"
+    ), patch.object(
+        dask_resource_manager.secrets_store,
+        "get_file_secrets_volume_as_k8s_specs",
+        return_value={"name": "secrets-volume"},
+    ):
+        dask_resource_manager.cluster_body = {
+            "spec": {
+                "worker": {
+                    "spec": {
+                        "containers": [
+                            {"args": ["worker-command"], "env": [], "volumeMounts": []}
+                        ],
+                        "volumes": [],
+                    }
+                },
+                "scheduler": {
+                    "spec": {"containers": [{}]},
+                    "service": {"selector": {}},
+                },
+            }
+        }
+        dask_resource_manager._prepare_cluster()
+
+    mock_harden.assert_called_once()

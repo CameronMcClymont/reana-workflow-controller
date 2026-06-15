@@ -8,6 +8,7 @@
 
 import logging
 import os
+import shlex
 import yaml
 
 from flask import current_app
@@ -43,6 +44,7 @@ from reana_workflow_controller.config import (
     REANA_INGRESS_HOST,
     REANA_INGRESS_CLASS_NAME,
     REANA_INGRESS_ANNOTATIONS,
+    REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM,
     TRAEFIK_ENABLED,
     TRAEFIK_EXTERNAL,
 )
@@ -226,6 +228,9 @@ class DaskResourceManager:
             self.secrets_store.get_file_secrets_volume_as_k8s_specs()
         )
 
+        if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM:
+            self._add_read_only_root_filesystem()
+
         if self.kerberos:
             self._add_krb5_containers()
         if self.voms_proxy:
@@ -299,11 +304,89 @@ class DaskResourceManager:
             volume_mount = {
                 "name": mount["name"],
                 "mountPath": mount.get("mountPath", mount["hostPath"]),
+                "readOnly": mount.get(
+                    "readOnly", REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM
+                ),
             }
             volume = {"name": mount["name"], "hostPath": {"path": mount["hostPath"]}}
             volumes_to_mount.append((volume_mount, volume))
 
         self._add_volumes(volumes_to_mount)
+
+    def _add_read_only_root_filesystem(self):
+        """Enforce a read-only root filesystem on Dask scheduler and worker pods.
+
+        Cache and tmp paths are redirected into the workspace, so that no
+        write surface is granted outside the mounted workspace volume.
+        """
+        worker_container = self.cluster_body["spec"]["worker"]["spec"]["containers"][0]
+        worker_container.setdefault("securityContext", {})[
+            "readOnlyRootFilesystem"
+        ] = True
+
+        # Each worker gets a private scratch directory inside the workspace;
+        # $DASK_WORKER_NAME is injected by the Dask operator and expanded by
+        # the worker's shell at startup.
+        worker_scratch = os.path.join(
+            self.workflow_workspace, ".reana", "dask", "worker-$DASK_WORKER_NAME"
+        )
+        worker_container["args"] = [
+            f'export TMPDIR="{worker_scratch}/tmp" XDG_CACHE_HOME="{worker_scratch}/cache" && '
+            'mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" && ' + worker_container["args"][0]
+        ]
+
+        scheduler_spec = self.cluster_body["spec"]["scheduler"]["spec"]
+        scheduler_container = scheduler_spec["containers"][0]
+        scheduler_container.setdefault("securityContext", {})[
+            "readOnlyRootFilesystem"
+        ] = True
+
+        # The scheduler does not need the user's analysis data, so mount only
+        # a scratch subdirectory of the workspace via subPath. The subPath
+        # returned by get_workspace_volume() is missing for the hostPath
+        # backend and the workspace path relative to the shared volume
+        # otherwise, so the scratch subPath has to be appended to it.
+        workspace_mount, workspace_volume = get_workspace_volume(
+            self.workflow_workspace
+        )
+        scheduler_subpath = os.path.join(
+            workspace_mount.get("subPath", ""), ".reana", "dask-scheduler"
+        )
+        scheduler_container.setdefault("volumeMounts", []).append(
+            {
+                "name": workspace_mount["name"],
+                "mountPath": "/scratch",
+                "subPath": scheduler_subpath,
+            }
+        )
+        scheduler_container.setdefault("env", []).extend(
+            [
+                {"name": "TMPDIR", "value": "/scratch/tmp"},
+                {"name": "XDG_CACHE_HOME", "value": "/scratch/cache"},
+            ]
+        )
+        scheduler_spec.setdefault("volumes", []).append(workspace_volume)
+
+        # subPath mounts are not auto-created, so create the scratch
+        # directories on the workspace before the scheduler container mounts
+        # them. The init container runs with the same image, and therefore the
+        # same default user, as the scheduler, so the directories it creates
+        # are writable by the scheduler without extra chown plumbing.
+        scratch_root = os.path.join(
+            workspace_mount["mountPath"], ".reana", "dask-scheduler"
+        )
+        scheduler_spec.setdefault("initContainers", []).append(
+            {
+                "name": "scheduler-scratch-init",
+                "image": self.cluster_image,
+                "command": ["/bin/sh", "-c"],
+                "args": [
+                    f"mkdir -p {shlex.quote(scratch_root + '/tmp')} "
+                    f"{shlex.quote(scratch_root + '/cache')}"
+                ],
+                "volumeMounts": [workspace_mount],
+            }
+        )
 
     def _add_volumes(self, volumes):
         """Add provided volumes to Dask cluster body."""

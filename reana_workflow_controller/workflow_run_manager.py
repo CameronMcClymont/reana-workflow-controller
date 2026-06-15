@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import shlex
 from typing import List, Optional
 
 from flask import current_app
@@ -636,6 +637,26 @@ class KubernetesWorkflowRunManager(WorkflowRunManager):
             self.workflow.workspace_path
         )
 
+        # With a read-only root filesystem the workflow engine cannot write to
+        # the cache and tmp paths baked into its image (e.g. Snakemake's
+        # ``XDG_CACHE_HOME=/.cache``), so redirect them into the workspace and
+        # create them before starting the engine.
+        if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM:
+            workspace_cache = os.path.join(
+                self.workflow.workspace_path, ".reana", "cache"
+            )
+            workspace_tmp = os.path.join(self.workflow.workspace_path, ".reana", "tmp")
+            workflow_engine_env_vars.extend(
+                [
+                    {"name": "XDG_CACHE_HOME", "value": workspace_cache},
+                    {"name": "TMPDIR", "value": workspace_tmp},
+                ]
+            )
+            command = [
+                f"mkdir -p {shlex.quote(workspace_cache)} {shlex.quote(workspace_tmp)} && "
+                + command[0]
+            ]
+
         labels = {
             "reana_workflow_mode": "batch",
             "reana-run-batch-workflow-uuid": str(self.workflow.id_),
@@ -708,9 +729,9 @@ class KubernetesWorkflowRunManager(WorkflowRunManager):
             run_as_user=WORKFLOW_RUNTIME_USER_UID,
             run_as_non_root=True,
             allow_privilege_escalation=False,
-            read_only_root_filesystem=True
-            if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM
-            else None,
+            read_only_root_filesystem=(
+                True if REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM else None
+            ),
         )
         workflow_engine_container.volume_mounts = [workspace_mount]
 

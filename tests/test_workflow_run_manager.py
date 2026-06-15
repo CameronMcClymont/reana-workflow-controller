@@ -10,6 +10,8 @@
 
 from __future__ import absolute_import, print_function
 
+import os
+
 import pytest
 from kubernetes.client.rest import ApiException
 from mock import DEFAULT, Mock, patch
@@ -265,3 +267,56 @@ def test_create_job_spec_kerberos(
     assert any(volume.startswith("reana-secretsstore") for volume in volumes)
     assert "krb5-cache" in volumes
     assert "krb5-conf" in volumes
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_create_job_spec_read_only_root_filesystem(
+    sample_serial_workflow_in_db,
+    empty_user_secrets,
+    corev1_api_client_with_user_secrets,
+    read_only,
+):
+    """Test that the read-only flag shapes the workflow-engine container."""
+    workflow = sample_serial_workflow_in_db
+    workspace_path = workflow.workspace_path
+
+    with patch(
+        "reana_commons.k8s.secrets.current_k8s_corev1_api_client",
+        corev1_api_client_with_user_secrets(empty_user_secrets),
+    ), patch(
+        "reana_workflow_controller.workflow_run_manager."
+        "REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM",
+        read_only,
+    ):
+        kwrm = KubernetesWorkflowRunManager(workflow)
+        job = kwrm._create_job_spec("run-batch-test")
+
+    containers = {c.name: c for c in job.spec.template.spec.containers}
+    engine = containers["workflow-engine"]
+    sidecar = containers["job-controller"]
+    engine_env = {e["name"]: e["value"] for e in engine.env}
+    sidecar_env = {e["name"]: e["value"] for e in sidecar.env}
+
+    # the flag is always forwarded to the job-controller sidecar with the
+    # same boolean meaning so the wfc -> r-j-c hop cannot silently break
+    assert sidecar_env["REANA_KUBERNETES_JOBS_READ_ONLY_ROOT_FILESYSTEM"] == str(
+        read_only
+    )
+
+    workspace_cache = os.path.join(workspace_path, ".reana", "cache")
+    workspace_tmp = os.path.join(workspace_path, ".reana", "tmp")
+    if read_only:
+        assert engine.security_context.read_only_root_filesystem is True
+        assert engine_env["XDG_CACHE_HOME"] == workspace_cache
+        assert engine_env["TMPDIR"] == workspace_tmp
+        assert engine.args[0].startswith(
+            f"mkdir -p {workspace_cache} {workspace_tmp} &&"
+        )
+        # the job-controller sidecar is deliberately left writable
+        assert sidecar.security_context is None or (
+            sidecar.security_context.read_only_root_filesystem is None
+        )
+    else:
+        assert engine.security_context.read_only_root_filesystem is None
+        assert "XDG_CACHE_HOME" not in engine_env
+        assert "TMPDIR" not in engine_env
